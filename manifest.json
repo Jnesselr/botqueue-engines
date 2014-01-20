@@ -2,5 +2,5 @@
   "directory": "win",
   "configuration": "default.ini",
   "category": "slicer",
-  "path": "Slic3r/slic3r.exe"
+  "path": "slic3r.exe"
 }
