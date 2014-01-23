@@ -1,0 +1,6 @@
+{
+  "directory": "win",
+  "configuration": "default.ini",
+  "category": "slicer",
+  "path": "slic3r.exe"
+}
