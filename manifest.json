@@ -1,0 +1,6 @@
+{
+  "directory": "osx.app",
+  "configuration": "default.ini",
+  "category": "slicer",
+  "path": "Contents/MacOS/slic3r"
+}
