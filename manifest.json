@@ -1,0 +1,6 @@
+{
+  "directory": "raspberrypi",
+  "configuration": "default.ini",
+  "category": "slicer",
+  "path": "slic3r"
+}
