@@ -228,7 +228,7 @@ sub init_extruders {
         (map $self->config->get("${_}_extruder")-1, qw(perimeter infill support_material support_material_interface)),
         (values %extruder_mapping),
     );
-    for my $extruder_id (keys %{{ map {$_ => 1} @used_extruders }}) {
+    for my $extruder_id (0 .. max(@used_extruders)) {
         $self->extruders->[$extruder_id] = Slic3r::Extruder->new(
             config => $self->config,
             id => $extruder_id,
@@ -702,6 +702,9 @@ sub write_gcode {
     } else {
         Slic3r::open(\$fh, ">", $file)
             or die "Failed to open $file for writing\n";
+        
+        # enable UTF-8 output since user might have entered Unicode characters in fields like notes
+        binmode $fh, ':utf8';
     }
     
     # write some information
