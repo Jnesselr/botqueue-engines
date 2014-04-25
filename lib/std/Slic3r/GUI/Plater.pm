@@ -384,7 +384,10 @@ sub load_file {
     $process_dialog->Pulse;
     
     local $SIG{__WARN__} = Slic3r::GUI::warning_catcher($self);
-    my $model = Slic3r::Model->read_from_file($input_file);
+    
+    my $model = eval { Slic3r::Model->read_from_file($input_file) };
+    Slic3r::GUI::show_error($self, $@) if $@;
+    
     for my $i (0 .. $#{$model->objects}) {
         my $object = Slic3r::GUI::Plater::Object->new(
             name                    => $basename,
@@ -594,8 +597,10 @@ sub split_object {
             input_file_object_id    => undef,
             model                   => $new_model,
             model_object_idx        => $#{$new_model->objects},
-            instances               => [ map $bb->min_point, 1..$current_copies_num ],
+            mesh_stats              => $mesh->stats,  # so that we can free model
+            instances               => [ map $bb->min_point->pp, 1..$current_copies_num ],
         );
+        
         push @{ $self->{objects} }, $object;
         $self->object_loaded($#{ $self->{objects} }, no_arrange => 1);
     }
@@ -1274,7 +1279,7 @@ has 'thumbnail_scaling_factor' => (is => 'rw', trigger => \&_transform_thumbnail
 has 'config'                => (is => 'rw', default => sub { Slic3r::Config->new });
 has 'layer_height_ranges'   => (is => 'rw', default => sub { [] }); # [ z_min, z_max, layer_height ]
 has 'material_mapping'      => (is => 'rw', default => sub { {} }); # { material_id => extruder_idx }
-has 'mesh_stats'            => (is => 'rw');
+has 'mesh_stats'            => (is => 'ro', required => 1);
 
 # statistics
 has 'facets'                => (is => 'rw');

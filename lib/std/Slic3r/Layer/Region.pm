@@ -167,42 +167,47 @@ sub make_perimeters {
         
         my @last = @{$surface->expolygon};
         my @last_gaps = ();
-        for my $i (1 .. $loop_number) {  # outer loop is 1
-            my @offsets = ();
-            if ($i == 1) {
-                # the minimum thickness of a single loop is:
-                # width/2 + spacing/2 + spacing/2 + width/2
-                @offsets = @{offset2(\@last, -(0.5*$pwidth + 0.5*$pspacing - 1), +(0.5*$pspacing - 1))};
+        if ($loop_number > 0) {
+            # we loop one time more than needed in order to find gaps after the last perimeter was applied
+            for my $i (1 .. ($loop_number+1)) {  # outer loop is 1
+                my @offsets = ();
+                if ($i == 1) {
+                    # the minimum thickness of a single loop is:
+                    # width/2 + spacing/2 + spacing/2 + width/2
+                    @offsets = @{offset2(\@last, -(0.5*$pwidth + 0.5*$pspacing - 1), +(0.5*$pspacing - 1))};
                 
-                # look for thin walls
-                if ($self->config->thin_walls) {
-                    my $diff = diff_ex(
-                        \@last,
-                        offset(\@offsets, +0.5*$pwidth),
-                    );
-                    push @thin_walls, grep abs($_->area) >= $gap_area_threshold, @$diff;
-                }
-            } else {
-                @offsets = @{offset2(\@last, -(1.5*$pspacing - 1), +(0.5*$pspacing - 1))};
-                
-                # look for gaps
-                if ($Slic3r::Config->gap_fill_speed > 0 && $self->config->fill_density > 0) {
-                    my $diff = diff_ex(
-                        offset(\@last, -0.5*$pspacing),
-                        offset(\@offsets, +0.5*$pspacing),
-                    );
-                    push @gaps, @last_gaps = grep abs($_->area) >= $gap_area_threshold, @$diff;
-                }
-            }
-            
-            last if !@offsets;
-            # clone polygons because these ExPolygons will go out of scope very soon
-            @last = @offsets;
-            foreach my $polygon (@offsets) {
-                if ($polygon->is_counter_clockwise) {
-                    push @contours, $polygon;
+                    # look for thin walls
+                    if ($self->config->thin_walls) {
+                        my $diff = diff_ex(
+                            \@last,
+                            offset(\@offsets, +0.5*$pwidth),
+                        );
+                        push @thin_walls, grep abs($_->area) >= $gap_area_threshold, @$diff;
+                    }
                 } else {
-                    push @holes, $polygon;
+                    @offsets = @{offset2(\@last, -(1.5*$pspacing - 1), +(0.5*$pspacing - 1))};
+                
+                    # look for gaps
+                    if ($Slic3r::Config->gap_fill_speed > 0 && $self->config->fill_density > 0) {
+                        my $diff = diff_ex(
+                            offset(\@last, -0.5*$pspacing),
+                            offset(\@offsets, +0.5*$pspacing),
+                        );
+                        push @gaps, @last_gaps = grep abs($_->area) >= $gap_area_threshold, @$diff;
+                    }
+                }
+            
+                last if !@offsets;
+                last if $i > $loop_number; # we were only looking for gaps this time
+            
+                # clone polygons because these ExPolygons will go out of scope very soon
+                @last = @offsets;
+                foreach my $polygon (@offsets) {
+                    if ($polygon->is_counter_clockwise) {
+                        push @contours, $polygon;
+                    } else {
+                        push @holes, $polygon;
+                    }
                 }
             }
         }
@@ -216,6 +221,7 @@ sub make_perimeters {
         # and then we offset back and forth by half the infill spacing to only consider the
         # non-collapsing regions
         $self->fill_surfaces->append(
+            map Slic3r::Surface->new(expolygon => $_, surface_type => S_TYPE_INTERNAL),  # use a bogus surface type
             @{offset2_ex(
                 [ map $_->simplify_as_polygons(&Slic3r::SCALED_RESOLUTION), @{union_ex(\@last)} ],
                 -($pspacing/2 + $ispacing/2),
@@ -242,7 +248,21 @@ sub make_perimeters {
         )};
         
         my @loops = ();
+        
         foreach my $polynode (@nodes) {
+            # if this is an external contour find all holes belonging to this contour(s)
+            # and prepend them
+            if ($is_contour && $depth == 0) {
+                # $polynode is the outermost loop of an island
+                my @holes = ();
+                for (my $i = 0; $i <= $#$holes_pt; $i++) {
+                    if ($polynode->{outer}->encloses_point($holes_pt->[$i]{outer}->first_point)) {
+                        push @holes, splice @$holes_pt, $i, 1;  # remove from candidates to reduce complexity
+                        $i--;
+                    }
+                }
+                push @loops, reverse map $traverse->([$_], 0), @holes;
+            }
             push @loops, $traverse->($polynode->{children}, $depth+1, $is_contour);
             
             # return ccw contours and cw holes
@@ -272,10 +292,7 @@ sub make_perimeters {
     };
     
     # order loops from inner to outer (in terms of object slices)
-    my @loops = (
-        (reverse $traverse->($holes_pt, 0)),
-        $traverse->($contours_pt, 0, 1),
-    );
+    my @loops = $traverse->($contours_pt, 0, 1);
     
     # if brim will be printed, reverse the order of perimeters so that
     # we continue inwards after having finished the brim
@@ -287,8 +304,7 @@ sub make_perimeters {
     # append perimeters
     $self->perimeters->append(@loops);
     
-    # detect thin walls by offsetting slices by half extrusion inwards
-    # and add them as perimeters
+    # process thin walls by collapsing slices to single passes
     if (@thin_walls) {
         my @p = map $_->medial_axis($pspacing), @thin_walls;
         my @paths = ();

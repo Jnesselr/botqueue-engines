@@ -171,7 +171,7 @@ sub bounding_box {
     if (!defined $self->_bounding_box) {
         $self->_bounding_box(Slic3r::Geometry::BoundingBox->merge(map $_->bounding_box, @{$self->objects}));
     }
-    return $self->_bounding_box;
+    return $self->_bounding_box->clone;
 }
 
 sub align_to_origin {
@@ -216,9 +216,9 @@ sub mesh {
         foreach my $instance (@instances) {
             my $mesh = $object->mesh->clone;
             if ($instance) {
-                $mesh->rotate($instance->rotation, Slic3r::Point->new(0,0));
-                $mesh->scale($instance->scaling_factor);
                 $mesh->align_to_origin;
+                $mesh->rotate($instance->rotation, $object->center_2D);
+                $mesh->scale($instance->scaling_factor);
                 $mesh->translate(@{$instance->offset}, 0);
             }
             push @meshes, $mesh;
@@ -308,7 +308,7 @@ use Storable qw(dclone);
 has 'input_file' => (is => 'rw');
 has 'model'     => (is => 'ro', weak_ref => 1, required => 1);
 has 'volumes'   => (is => 'ro', default => sub { [] });
-has 'instances' => (is => 'rw');
+has 'instances' => (is => 'rw'); # in unscaled coordinates
 has 'config'    => (is => 'rw', default => sub { Slic3r::Config->new });
 has 'layer_height_ranges' => (is => 'rw', default => sub { [] }); # [ z_min, z_max, layer_height ]
 has 'material_mapping'      => (is => 'rw', default => sub { {} }); # { material_id => extruder_idx }
@@ -368,7 +368,7 @@ sub bounding_box {
         $bounding_box->merge(Slic3r::Geometry::BoundingBox->new_from_bb($_->bb3)) for @meshes;
         $self->_bounding_box($bounding_box);
     }
-    return $self->_bounding_box;
+    return $self->_bounding_box->clone;
 }
 
 sub align_to_origin {

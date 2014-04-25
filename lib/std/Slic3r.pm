@@ -7,7 +7,7 @@ use strict;
 use warnings;
 require v5.10;
 
-our $VERSION = "1.0.0RC1";
+our $VERSION = "1.0.0RC2";
 
 our $debug = 0;
 sub debugf {
@@ -159,5 +159,9 @@ sub open {
     my ($fh, $mode, $filename) = @_;
     return CORE::open $$fh, $mode, encode_path($filename);
 }
+
+# this package declaration prevents an ugly fatal warning to be emitted when
+# spawning a new thread
+package GLUquadricObjPtr;
 
 1;
