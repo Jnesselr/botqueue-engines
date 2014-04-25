@@ -1,0 +1,6 @@
+{
+  "directory": "linux",
+  "configuration": "default.ini",
+  "category": "slicer",
+  "path": "bin/slic3r"
+}
