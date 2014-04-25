@@ -26,17 +26,30 @@ sub BUILD {
  	
     # make layers taking custom heights into account
     my $print_z = my $slice_z = my $height = my $id = 0;
+    my $first_object_layer_height = -1;
     
     # add raft layers
     if ($self->config->raft_layers > 0) {
+        $id += $self->config->raft_layers;
+        
+        # raise first object layer Z by the thickness of the raft itself
+        # plus the extra distance required by the support material logic
         $print_z += $Slic3r::Config->get_value('first_layer_height');
         $print_z += $Slic3r::Config->layer_height * ($self->config->raft_layers - 1);
-        $id += $self->config->raft_layers;
+        
+        # at this stage we don't know which nozzles are actually used for the first layer
+        # so we compute the average of all of them
+        my $nozzle_diameter = sum(@{$Slic3r::Config->nozzle_diameter})/@{$Slic3r::Config->nozzle_diameter};
+        my $distance = Slic3r::Print::SupportMaterial::contact_distance($nozzle_diameter);
+        
+        # force first layer print_z according to the contact distance
+        # (the loop below will raise print_z by such height)
+        $first_object_layer_height = $distance;
     }
     
     # loop until we have at least one layer and the max slice_z reaches the object height
     my $max_z = unscale $self->size->[Z];
-    while (!@{$self->layers} || ($slice_z - $height) <= $max_z) {
+    while (($slice_z - $height) <= $max_z) {
         # assign the default height to the layer according to the general settings
         $height = ($id == 0)
             ? $Slic3r::Config->get_value('first_layer_height')
@@ -51,6 +64,10 @@ sub BUILD {
                 $slice_z += $range->[1] - $range->[0];
                 next;
             }
+        }
+        
+        if ($first_object_layer_height != -1 && !@{$self->layers}) {
+            $height = $first_object_layer_height;
         }
         
         $print_z += $height;
@@ -93,9 +110,12 @@ sub init_config {
     $self->config(Slic3r::Config->merge($self->print->config, $self->config_overrides));
 }
 
+# this is the *total* layer count
+# this value is not supposed to be compared with $layer->id
+# since they have different semantics
 sub layer_count {
     my $self = shift;
-    return scalar @{ $self->layers };
+    return scalar @{ $self->layers } + scalar @{ $self->support_layers };
 }
 
 sub bounding_box {
@@ -219,9 +239,10 @@ sub make_perimeters {
     # hollow objects
     if ($self->config->extra_perimeters && $self->config->perimeters > 0 && $self->config->fill_density > 0) {
         for my $region_id (0 .. ($self->print->regions_count-1)) {
-            for my $layer_id (0 .. $self->layer_count-2) {
-                my $layerm          = $self->layers->[$layer_id]->regions->[$region_id];
-                my $upper_layerm    = $self->layers->[$layer_id+1]->regions->[$region_id];
+            for my $i (0 .. $#{$self->layers}-1) {
+                # remember that $i != $layer->id
+                my $layerm          = $self->layers->[$i]->regions->[$region_id];
+                my $upper_layerm    = $self->layers->[$i+1]->regions->[$region_id];
                 my $perimeter_spacing       = $layerm->perimeter_flow->scaled_spacing;
                 
                 my $overlap = $perimeter_spacing;  # one perimeter
@@ -258,7 +279,7 @@ sub make_perimeters {
                         
                         # only add the perimeter if there's an intersection with the collapsed area
                         last CYCLE if !@{ intersection($diff, $hypothetical_perimeter) };
-                        Slic3r::debugf "  adding one more perimeter at layer %d\n", $layer_id;
+                        Slic3r::debugf "  adding one more perimeter at layer %d\n", $layerm->id;
                         $slice->extra_perimeters($extra_perimeters);
                     }
                 }
@@ -267,11 +288,11 @@ sub make_perimeters {
     }
     
     Slic3r::parallelize(
-        items => sub { 0 .. ($self->layer_count-1) },
+        items => sub { 0 .. $#{$self->layers} },
         thread_cb => sub {
             my $q = shift;
-            while (defined (my $layer_id = $q->dequeue)) {
-                $self->layers->[$layer_id]->make_perimeters;
+            while (defined (my $i = $q->dequeue)) {
+                $self->layers->[$i]->make_perimeters;
             }
         },
         collect_cb => sub {},
@@ -286,7 +307,7 @@ sub detect_surfaces_type {
     Slic3r::debugf "Detecting solid surfaces...\n";
     
     for my $region_id (0 .. ($self->print->regions_count-1)) {
-        for my $i (0 .. ($self->layer_count-1)) {
+        for my $i (0 .. $#{$self->layers}) {
             my $layerm = $self->layers->[$i]->regions->[$region_id];
         
             # prepare a reusable subroutine to make surface differences
@@ -516,8 +537,8 @@ sub process_external_surfaces {
     
     for my $region_id (0 .. ($self->print->regions_count-1)) {
         $self->layers->[0]->regions->[$region_id]->process_external_surfaces(undef);
-        for my $layer_id (1 .. ($self->layer_count-1)) {
-            $self->layers->[$layer_id]->regions->[$region_id]->process_external_surfaces($self->layers->[$layer_id-1]);
+        for my $i (1 .. $#{$self->layers}) {
+            $self->layers->[$i]->regions->[$region_id]->process_external_surfaces($self->layers->[$i-1]);
         }
     }
 }
@@ -528,7 +549,7 @@ sub discover_horizontal_shells {
     Slic3r::debugf "==> DISCOVERING HORIZONTAL SHELLS\n";
     
     for my $region_id (0 .. ($self->print->regions_count-1)) {
-        for (my $i = 0; $i < $self->layer_count; $i++) {
+        for (my $i = 0; $i <= $#{$self->layers}; $i++) {
             my $layerm = $self->layers->[$i]->regions->[$region_id];
             
             if ($self->config->solid_infill_every_layers && $self->config->fill_density > 0
@@ -560,10 +581,11 @@ sub discover_horizontal_shells {
                         abs($n - $i) <= $solid_layers-1; 
                         ($type == S_TYPE_TOP) ? $n-- : $n++) {
                     
-                    next if $n < 0 || $n >= $self->layer_count;
+                    next if $n < 0 || $n > $#{$self->layers};
                     Slic3r::debugf "  looking for neighbors on layer %d...\n", $n;
                     
-                    my $neighbor_fill_surfaces = $self->layers->[$n]->regions->[$region_id]->fill_surfaces;
+                    my $neighbor_layerm = $self->layers->[$n]->regions->[$region_id];
+                    my $neighbor_fill_surfaces = $neighbor_layerm->fill_surfaces;
                     my @neighbor_fill_surfaces = map $_->clone, @$neighbor_fill_surfaces;  # clone because we will use these surfaces even after clearing the collection
                     
                     # find intersection between neighbor and current layer's surfaces
@@ -582,41 +604,49 @@ sub discover_horizontal_shells {
                     );
                     next EXTERNAL if !@$new_internal_solid;
                     
-                    # make sure the new internal solid is wide enough, as it might get collapsed when
-                    # spacing is added in Fill.pm
+                    if ($self->config->fill_density == 0) {
+                        # if we're printing a hollow object we discard any solid shell thinner
+                        # than a perimeter width, since it's probably just crossing a sloping wall
+                        # and it's not wanted in a hollow print even if it would make sense when
+                        # obeying the solid shell count option strictly (DWIM!)
+                        my $margin = $neighbor_layerm->perimeter_flow->scaled_width;
+                        my $too_narrow = diff(
+                            $new_internal_solid,
+                            offset2($new_internal_solid, -$margin, +$margin, CLIPPER_OFFSET_SCALE, JT_MITER, 5),
+                            1,
+                        );
+                        $new_internal_solid = $solid = diff(
+                            $new_internal_solid,
+                            $too_narrow,
+                        ) if @$too_narrow;
+                    }
+                    
+                    # make sure the new internal solid is wide enough, as it might get collapsed
+                    # when spacing is added in Fill.pm
                     {
+                        my $margin = 3 * $layerm->solid_infill_flow->scaled_width; # require at least this size
                         # we use a higher miterLimit here to handle areas with acute angles
                         # in those cases, the default miterLimit would cut the corner and we'd
                         # get a triangle in $too_narrow; if we grow it below then the shell
                         # would have a different shape from the external surface and we'd still
                         # have the same angle, so the next shell would be grown even more and so on.
-                        my $margin = 3 * $layerm->solid_infill_flow->scaled_width; # require at least this size
                         my $too_narrow = diff(
                             $new_internal_solid,
                             offset2($new_internal_solid, -$margin, +$margin, CLIPPER_OFFSET_SCALE, JT_MITER, 5),
                             1,
                         );
                         
-                        # if some parts are going to collapse, use a different strategy according to fill density
                         if (@$too_narrow) {
-                            if ($self->config->fill_density > 0) {
-                                # if we have internal infill, grow the collapsing parts and add the extra area to 
-                                # the neighbor layer as well as to our original surfaces so that we support this 
-                                # additional area in the next shell too
-
-                                # make sure our grown surfaces don't exceed the fill area
-                                my @grown = @{intersection(
-                                    offset($too_narrow, +$margin),
-                                    [ map $_->p, @neighbor_fill_surfaces ],
-                                )};
-                                $new_internal_solid = $solid = [ @grown, @$new_internal_solid ];
-                            } else {
-                                # if we're printing a hollow object, we discard such small parts
-                                $new_internal_solid = $solid = diff(
-                                    $new_internal_solid,
-                                    $too_narrow,
-                                );
-                            }
+                            # grow the collapsing parts and add the extra area to  the neighbor layer 
+                            # as well as to our original surfaces so that we support this 
+                            # additional area in the next shell too
+                        
+                            # make sure our grown surfaces don't exceed the fill area
+                            my @grown = @{intersection(
+                                offset($too_narrow, +$margin),
+                                [ map $_->p, @neighbor_fill_surfaces ],
+                            )};
+                            $new_internal_solid = $solid = [ @grown, @$new_internal_solid ];
                         }
                     }
                     
@@ -666,8 +696,7 @@ sub combine_infill {
     return unless $self->config->infill_every_layers > 1 && $self->config->fill_density > 0;
     my $every = $self->config->infill_every_layers;
     
-    my $layer_count = $self->layer_count;
-    my @layer_heights = map $self->layers->[$_]->height, 0 .. $layer_count-1;
+    my @layer_heights = map $_->height, @{$self->layers};
     
     for my $region_id (0 .. ($self->print->regions_count-1)) {
         # limit the number of combined layers to the maximum height allowed by this regions' nozzle
@@ -774,7 +803,7 @@ sub combine_infill {
 sub generate_support_material {
     my $self = shift;
     return unless ($self->config->support_material || $self->config->raft_layers > 0)
-        && $self->layer_count >= 2;
+        && scalar(@{$self->layers}) >= 2;
     
     Slic3r::Print::SupportMaterial
         ->new(config => $self->config, flow => $self->print->support_material_flow)
