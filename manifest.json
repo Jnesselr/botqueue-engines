@@ -1,0 +1,6 @@
+{
+    "directory": "Cura",
+    "configuration": "default.ini",
+    "category": "slicer",
+    "path": "Cura/cura.sh"
+}
